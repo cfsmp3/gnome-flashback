@@ -27,6 +27,7 @@ struct _GfLabelWindow
   GfPopupWindow  parent;
 
   GdkRectangle   monitor;
+  gint           size;
 
   guint          hide_timeout_id;
 
@@ -54,6 +55,85 @@ gf_label_window_realize (GtkWidget *widget)
 }
 
 static void
+gf_label_window_get_preferred_width (GtkWidget *widget,
+                                     gint      *minimum_width,
+                                     gint      *natural_width)
+{
+  GfLabelWindow *window;
+
+  window = GF_LABEL_WINDOW (widget);
+
+  GTK_WIDGET_CLASS (gf_label_window_parent_class)->get_preferred_width (widget,
+                                                                         minimum_width,
+                                                                         natural_width);
+
+  /* The label is a square of fixed size, it must not grow with its text. */
+  *minimum_width = *natural_width = window->size;
+}
+
+static void
+gf_label_window_get_preferred_height (GtkWidget *widget,
+                                      gint      *minimum_height,
+                                      gint      *natural_height)
+{
+  GfLabelWindow *window;
+
+  window = GF_LABEL_WINDOW (widget);
+
+  GTK_WIDGET_CLASS (gf_label_window_parent_class)->get_preferred_height (widget,
+                                                                          minimum_height,
+                                                                          natural_height);
+
+  *minimum_height = *natural_height = window->size;
+}
+
+static void
+gf_label_window_get_preferred_width_for_height (GtkWidget *widget,
+                                                gint       height,
+                                                gint      *minimum_width,
+                                                gint      *natural_width)
+{
+  gf_label_window_get_preferred_width (widget, minimum_width, natural_width);
+}
+
+static void
+gf_label_window_get_preferred_height_for_width (GtkWidget *widget,
+                                                gint       width,
+                                                gint      *minimum_height,
+                                                gint      *natural_height)
+{
+  gf_label_window_get_preferred_height (widget, minimum_height, natural_height);
+}
+
+static void
+fit_label (GfLabelWindow *window)
+{
+  GtkLabel *label;
+  gint available;
+  GtkRequisition natural;
+  gdouble scale;
+  PangoAttrList *attrs;
+
+  label = GTK_LABEL (window->label);
+  available = window->size - 2 * gtk_container_get_border_width (GTK_CONTAINER (window));
+  if (available <= 0)
+    return;
+
+  gtk_widget_get_preferred_size (window->label, NULL, &natural);
+  if (natural.width <= available && natural.height <= available)
+    return;
+
+  /* Shrink text that does not fit so that all numbers stay visible. */
+  scale = MIN ((gdouble) available / MAX (natural.width, 1),
+               (gdouble) available / MAX (natural.height, 1));
+
+  attrs = pango_attr_list_new ();
+  pango_attr_list_insert (attrs, pango_attr_scale_new (scale));
+  gtk_label_set_attributes (label, attrs);
+  pango_attr_list_unref (attrs);
+}
+
+static void
 gf_label_window_class_init (GfLabelWindowClass *window_class)
 {
   GtkWidgetClass *widget_class;
@@ -61,6 +141,10 @@ gf_label_window_class_init (GfLabelWindowClass *window_class)
   widget_class = GTK_WIDGET_CLASS (window_class);
 
   widget_class->realize = gf_label_window_realize;
+  widget_class->get_preferred_width = gf_label_window_get_preferred_width;
+  widget_class->get_preferred_height = gf_label_window_get_preferred_height;
+  widget_class->get_preferred_width_for_height = gf_label_window_get_preferred_width_for_height;
+  widget_class->get_preferred_height_for_width = gf_label_window_get_preferred_height_for_width;
 }
 
 static void
@@ -104,9 +188,11 @@ gf_label_window_new (const GdkRectangle *workarea,
   height = window->monitor.height;
   size = 60 * MAX (1, MIN (width / 640.0, height / 480.0));
 
+  window->size = size;
   gtk_window_resize (GTK_WINDOW (window), size, size);
 
   gtk_label_set_text (GTK_LABEL (window->label), label);
+  fit_label (window);
 
   return window;
 }
