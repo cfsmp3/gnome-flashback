@@ -26,15 +26,17 @@ G_BEGIN_DECLS
 G_DECLARE_FINAL_TYPE (FlashbackMonitorLabeler, flashback_monitor_labeler,
                       FLASHBACK, MONITOR_LABELER, GObject)
 
-FlashbackMonitorLabeler *flashback_monitor_labeler_new  (void);
+FlashbackMonitorLabeler *flashback_monitor_labeler_new                 (void);
 
-void                     flashback_monitor_labeler_show (FlashbackMonitorLabeler *labeler,
-                                                         GfMonitorManager        *monitor_manager,
-                                                         const gchar             *sender,
-                                                         GVariant                *params);
+void                     flashback_monitor_labeler_set_monitor_manager (FlashbackMonitorLabeler *labeler,
+                                                                        GfMonitorManager        *monitor_manager);
 
-void                     flashback_monitor_labeler_hide (FlashbackMonitorLabeler *labeler,
-                                                         const gchar             *sender);
+void                     flashback_monitor_labeler_show                (FlashbackMonitorLabeler *labeler,
+                                                                        const gchar             *sender,
+                                                                        GVariant                *params);
+
+void                     flashback_monitor_labeler_hide                (FlashbackMonitorLabeler *labeler,
+                                                                        const gchar             *sender);
 
 G_END_DECLS
 

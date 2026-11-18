@@ -25,11 +25,13 @@ G_BEGIN_DECLS
 #define FLASHBACK_TYPE_OSD flashback_osd_get_type ()
 G_DECLARE_FINAL_TYPE (FlashbackOsd, flashback_osd, FLASHBACK, OSD, GObject)
 
-FlashbackOsd *flashback_osd_new  (void);
+FlashbackOsd *flashback_osd_new                 (void);
 
-void          flashback_osd_show (FlashbackOsd     *osd,
-                                  GfMonitorManager *monitor_manager,
-                                  GVariant         *params);
+void          flashback_osd_set_monitor_manager (FlashbackOsd     *osd,
+                                                 GfMonitorManager *monitor_manager);
+
+void          flashback_osd_show                (FlashbackOsd     *osd,
+                                                 GVariant         *params);
 
 G_END_DECLS
 

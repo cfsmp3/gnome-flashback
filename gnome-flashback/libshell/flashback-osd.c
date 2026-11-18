@@ -18,46 +18,97 @@
 #include <config.h>
 #include "flashback-osd.h"
 #include "gf-osd-window.h"
+#include "gf-shell-monitors.h"
 
 struct _FlashbackOsd
 {
-  GObject       parent;
+  GObject           parent;
 
-  GfOsdWindow **windows;
-  gint          n_monitors;
+  GfMonitorManager *monitor_manager;
 
-  gulong        monitors_changed_id;
+  GfOsdWindow     **windows;
+  gint              n_monitors;
+
+  gulong            monitors_changed_id;
 };
 
 G_DEFINE_TYPE (FlashbackOsd, flashback_osd, G_TYPE_OBJECT)
 
 static void
+destroy_windows (FlashbackOsd *osd)
+{
+  gint i;
+
+  if (osd->windows == NULL)
+    return;
+
+  for (i = 0; i < osd->n_monitors; i++)
+    gtk_widget_destroy (GTK_WIDGET (osd->windows[i]));
+
+  g_clear_pointer (&osd->windows, g_free);
+  osd->n_monitors = 0;
+}
+
+static void
+update_windows (FlashbackOsd *osd)
+{
+  GList *logical_monitors;
+  GList *l;
+  gint i;
+
+  destroy_windows (osd);
+
+  if (osd->monitor_manager == NULL)
+    return;
+
+  logical_monitors = gf_monitor_manager_get_logical_monitors (osd->monitor_manager);
+
+  /* One window for each logical monitor, in the order of the monitor
+   * manager's list. Mirrored monitors share a window.
+   */
+  osd->n_monitors = g_list_length (logical_monitors);
+  osd->windows = g_new0 (GfOsdWindow *, osd->n_monitors);
+
+  for (l = logical_monitors, i = 0; l != NULL; l = l->next, i++)
+    {
+      GdkRectangle workarea;
+
+      gf_shell_monitors_get_workarea (l->data, &workarea);
+      osd->windows[i] = gf_osd_window_new (&workarea);
+    }
+}
+
+static void
 monitors_changed (GdkScreen *screen,
                   gpointer   user_data)
 {
+  update_windows (FLASHBACK_OSD (user_data));
+}
+
+static void
+monitor_manager_monitors_changed_cb (GfMonitorManager *monitor_manager,
+                                     FlashbackOsd     *osd)
+{
+  update_windows (osd);
+}
+
+static void
+flashback_osd_dispose (GObject *object)
+{
   FlashbackOsd *osd;
-  GdkDisplay *display;
-  gint n_monitors;
-  gint i;
 
-  osd = FLASHBACK_OSD (user_data);
+  osd = FLASHBACK_OSD (object);
 
-  display = gdk_display_get_default ();
-  n_monitors = gdk_display_get_n_monitors (display);
-
-  if (osd->windows != NULL)
+  if (osd->monitor_manager != NULL)
     {
-      for (i = 0; i < osd->n_monitors; i++)
-        gtk_widget_destroy (GTK_WIDGET (osd->windows[i]));
-      g_free (osd->windows);
+      g_signal_handlers_disconnect_by_func (osd->monitor_manager,
+                                            monitor_manager_monitors_changed_cb,
+                                            osd);
+
+      osd->monitor_manager = NULL;
     }
 
-  osd->windows = g_new0 (GfOsdWindow *, n_monitors);
-
-  for (i = 0; i < n_monitors; i++)
-    osd->windows[i] = gf_osd_window_new (i);
-
-  osd->n_monitors = n_monitors;
+  G_OBJECT_CLASS (flashback_osd_parent_class)->dispose (object);
 }
 
 static void
@@ -71,14 +122,7 @@ flashabck_osd_finalize (GObject *object)
 
   g_signal_handler_disconnect (screen, osd->monitors_changed_id);
 
-  if (osd->windows != NULL)
-    {
-      gint i;
-
-      for (i = 0; i < osd->n_monitors; i++)
-        gtk_widget_destroy (GTK_WIDGET (osd->windows[i]));
-      g_free (osd->windows);
-    }
+  destroy_windows (osd);
 
   G_OBJECT_CLASS (flashback_osd_parent_class)->finalize (object);
 }
@@ -90,6 +134,7 @@ flashback_osd_class_init (FlashbackOsdClass *osd_class)
 
   object_class = G_OBJECT_CLASS (osd_class);
 
+  object_class->dispose = flashback_osd_dispose;
   object_class->finalize = flashabck_osd_finalize;
 }
 
@@ -104,7 +149,7 @@ flashback_osd_init (FlashbackOsd *osd)
     g_signal_connect (screen, "monitors-changed",
                       G_CALLBACK (monitors_changed), osd);
 
-  monitors_changed (screen, osd);
+  update_windows (osd);
 }
 
 FlashbackOsd *
@@ -114,9 +159,34 @@ flashback_osd_new (void)
 }
 
 void
-flashback_osd_show (FlashbackOsd     *osd,
-                    GfMonitorManager *monitor_manager,
-                    GVariant         *params)
+flashback_osd_set_monitor_manager (FlashbackOsd     *osd,
+                                   GfMonitorManager *monitor_manager)
+{
+  if (osd->monitor_manager == monitor_manager)
+    return;
+
+  if (osd->monitor_manager != NULL)
+    {
+      g_signal_handlers_disconnect_by_func (osd->monitor_manager,
+                                            monitor_manager_monitors_changed_cb,
+                                            osd);
+    }
+
+  osd->monitor_manager = monitor_manager;
+
+  if (monitor_manager != NULL)
+    {
+      g_signal_connect (monitor_manager, "monitors-changed",
+                        G_CALLBACK (monitor_manager_monitors_changed_cb),
+                        osd);
+    }
+
+  update_windows (osd);
+}
+
+void
+flashback_osd_show (FlashbackOsd *osd,
+                    GVariant     *params)
 {
   GVariantDict dict;
   const gchar *icon_name;
@@ -125,6 +195,7 @@ flashback_osd_show (FlashbackOsd     *osd,
   gdouble level;
   gdouble max_level;
   const gchar *connector;
+  GfLogicalMonitor *logical_monitor;
   gint monitor;
   gint i;
 
@@ -145,9 +216,20 @@ flashback_osd_show (FlashbackOsd     *osd,
   if (!g_variant_dict_lookup (&dict, "connector", "&s", &connector))
     connector = NULL;
 
+  logical_monitor = gf_shell_monitors_get_logical_monitor (osd->monitor_manager,
+                                                           connector);
+
+  /* The windows follow the list of logical monitors, which is only
+   * replaced together with the windows on "monitors-changed".
+   */
   monitor = -1;
-  if (connector != NULL)
-    monitor = gf_monitor_manager_get_monitor_for_connector (monitor_manager, connector);
+  if (logical_monitor != NULL)
+    {
+      GList *logical_monitors;
+
+      logical_monitors = gf_monitor_manager_get_logical_monitors (osd->monitor_manager);
+      monitor = g_list_index (logical_monitors, logical_monitor);
+    }
 
   icon = NULL;
   if (icon_name)

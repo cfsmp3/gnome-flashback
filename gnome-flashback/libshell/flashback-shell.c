@@ -256,7 +256,7 @@ handle_show_osd (GfShellGen            *shell_gen,
                  GVariant              *params,
                  FlashbackShell        *shell)
 {
-  flashback_osd_show (shell->osd, shell->monitor_manager, params);
+  flashback_osd_show (shell->osd, params);
 
   gf_shell_gen_complete_show_osd (shell_gen, invocation);
 
@@ -273,10 +273,7 @@ handle_show_monitor_labels (GfShellGen            *shell_gen,
 
   sender = g_dbus_method_invocation_get_sender (invocation);
 
-  g_assert (shell->monitor_manager != NULL);
-
-  flashback_monitor_labeler_show (shell->labeler, shell->monitor_manager,
-                                  sender, params);
+  flashback_monitor_labeler_show (shell->labeler, sender, params);
 
   gf_shell_gen_complete_show_monitor_labels (shell_gen, invocation);
 
@@ -569,5 +566,8 @@ flashback_shell_set_monitor_manager (FlashbackShell   *shell,
 {
   shell->monitor_manager = monitor_manager;
 
+  flashback_monitor_labeler_set_monitor_manager (shell->labeler,
+                                                 monitor_manager);
+  flashback_osd_set_monitor_manager (shell->osd, monitor_manager);
   gf_shell_brightness_set_monitor_manager (shell->brightness, monitor_manager);
 }

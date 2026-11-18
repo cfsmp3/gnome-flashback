@@ -180,22 +180,18 @@ gf_osd_window_init (GfOsdWindow *window)
 }
 
 GfOsdWindow *
-gf_osd_window_new (gint monitor)
+gf_osd_window_new (const GdkRectangle *workarea)
 {
   GfOsdWindow *window;
-  GdkDisplay *display;
-  GdkMonitor *gdk_monitor;
   gint width;
   gint height;
   gint size;
 
-  display = gdk_display_get_default ();
   window = g_object_new (GF_TYPE_OSD_WINDOW,
                          "type", GTK_WINDOW_POPUP,
                          NULL);
 
-  gdk_monitor = gdk_display_get_monitor (display, monitor);
-  gdk_monitor_get_workarea (gdk_monitor, &window->monitor);
+  window->monitor = *workarea;
 
   width = window->monitor.width;
   height = window->monitor.height;

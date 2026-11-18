@@ -600,7 +600,7 @@ show_osd (GfShellBrightness *self,
                          g_variant_new_double (level));
 
   params = g_variant_ref_sink (g_variant_builder_end (&builder));
-  flashback_osd_show (self->osd, self->monitor_manager, params);
+  flashback_osd_show (self->osd, params);
   g_variant_unref (params);
 }
 

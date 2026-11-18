@@ -86,23 +86,19 @@ gf_label_window_init (GfLabelWindow *window)
 }
 
 GfLabelWindow *
-gf_label_window_new (gint         monitor,
-                     const gchar *label)
+gf_label_window_new (const GdkRectangle *workarea,
+                     const gchar        *label)
 {
   GfLabelWindow *window;
-  GdkDisplay *display;
-  GdkMonitor *gdk_monitor;
   gint width;
   gint height;
   gint size;
 
-  display = gdk_display_get_default ();
   window = g_object_new (GF_TYPE_LABEL_WINDOW,
                          "type", GTK_WINDOW_POPUP,
                          NULL);
 
-  gdk_monitor = gdk_display_get_monitor (display, monitor);
-  gdk_monitor_get_workarea (gdk_monitor, &window->monitor);
+  window->monitor = *workarea;
 
   width = window->monitor.width;
   height = window->monitor.height;

@@ -35,6 +35,8 @@ libshell_la_SOURCES = \
 	gf-shell-brightness.h \
 	gf-shell-introspect.c \
 	gf-shell-introspect.h \
+	gf-shell-monitors.c \
+	gf-shell-monitors.h \
 	$(NULL)
 
 libshell_la_LDFLAGS = \

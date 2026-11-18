@@ -26,11 +26,11 @@ G_BEGIN_DECLS
 G_DECLARE_FINAL_TYPE (GfLabelWindow, gf_label_window,
                       GF, LABEL_WINDOW, GfPopupWindow)
 
-GfLabelWindow *gf_label_window_new  (gint           monitor,
-                                     const gchar   *label);
+GfLabelWindow *gf_label_window_new  (const GdkRectangle *workarea,
+                                     const gchar        *label);
 
-void           gf_label_window_show (GfLabelWindow *window);
-void           gf_label_window_hide (GfLabelWindow *window);
+void           gf_label_window_show (GfLabelWindow      *window);
+void           gf_label_window_hide (GfLabelWindow      *window);
 
 G_END_DECLS
 
