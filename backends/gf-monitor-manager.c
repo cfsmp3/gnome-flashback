@@ -2968,9 +2968,63 @@ apply_stored_config (GfMonitorManager       *manager,
   return config;
 }
 
+static gboolean
+apply_hotplug_config (GfMonitorManager *manager)
+{
+  GfMonitorsConfig *current_config;
+  GfMonitorsConfig *config;
+  GError *error;
+
+  current_config = gf_monitor_config_manager_get_current (manager->config_manager);
+  if (!current_config)
+    return FALSE;
+
+  config = gf_monitor_config_manager_create_for_hotplug (manager->config_manager,
+                                                         current_config);
+  if (!config)
+    return FALSE;
+
+  error = NULL;
+
+  if (!gf_monitor_manager_apply_monitors_config (manager, config,
+                                                 GF_MONITORS_CONFIG_METHOD_TEMPORARY,
+                                                 &error))
+    {
+      g_warning ("Failed to keep the monitor configuration: %s",
+                 error->message);
+      g_error_free (error);
+      g_object_unref (config);
+
+      return FALSE;
+    }
+
+  g_object_unref (config);
+
+  return TRUE;
+}
+
+/*
+ * Called when the outputs changed, typically because a monitor was plugged in
+ * or unplugged. When there is no stored configuration for the monitors
+ * connected now, the monitors that stay connected keep their configuration
+ * and the newly connected ones are added to the right of them, instead of a
+ * new configuration replacing the modes, scale and positions the user chose.
+ * Hardware that suggests its own layout (hotplug_mode_update) and a
+ * configuration change that waits for confirmation are handled as before.
+ */
 void
 gf_monitor_manager_reconfigure (GfMonitorManager *self)
 {
+  GfMonitorManagerPrivate *priv;
+
+  priv = gf_monitor_manager_get_instance_private (self);
+
+  if (priv->persistent_timeout_id == 0 &&
+      !gf_monitor_manager_has_hotplug_mode_update (self) &&
+      !gf_monitor_config_manager_get_stored (self->config_manager) &&
+      apply_hotplug_config (self))
+    return;
+
   gf_monitor_manager_ensure_configured (self);
 }
 

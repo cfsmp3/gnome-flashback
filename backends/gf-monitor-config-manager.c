@@ -1684,6 +1684,234 @@ gf_monitor_config_manager_update_identities (GfMonitorConfigManager *config_mana
   return updated_config;
 }
 
+/*
+ * Removes the configuration of monitors that are no longer connected. Returns
+ * FALSE when a monitor that is still connected cannot keep its configuration
+ * because its mode is gone or it is not visible.
+ */
+static gboolean
+remove_disconnected_monitor_configs (GfMonitorManager  *monitor_manager,
+                                     GList            **logical_monitor_configs)
+{
+  GList *l;
+
+  l = *logical_monitor_configs;
+  while (l != NULL)
+    {
+      GfLogicalMonitorConfig *logical_monitor_config;
+      GList *next;
+      GList *k;
+
+      logical_monitor_config = l->data;
+      next = l->next;
+
+      k = logical_monitor_config->monitor_configs;
+      while (k != NULL)
+        {
+          GfMonitorConfig *monitor_config;
+          GList *next_monitor_config;
+          GfMonitor *monitor;
+
+          monitor_config = k->data;
+          next_monitor_config = k->next;
+
+          monitor = gf_monitor_manager_get_monitor_from_spec (monitor_manager,
+                                                              monitor_config->monitor_spec);
+
+          if (monitor == NULL)
+            {
+              gf_monitor_config_free (monitor_config);
+              logical_monitor_config->monitor_configs =
+                g_list_delete_link (logical_monitor_config->monitor_configs, k);
+            }
+          else if (!gf_monitor_manager_is_monitor_visible (monitor_manager, monitor) ||
+                   !gf_monitor_get_mode_from_spec (monitor, monitor_config->mode_spec))
+            {
+              return FALSE;
+            }
+
+          k = next_monitor_config;
+        }
+
+      if (logical_monitor_config->monitor_configs == NULL)
+        {
+          gf_logical_monitor_config_free (logical_monitor_config);
+          *logical_monitor_configs = g_list_delete_link (*logical_monitor_configs, l);
+        }
+
+      l = next;
+    }
+
+  return TRUE;
+}
+
+static gboolean
+is_monitor_configured (GList         *logical_monitor_configs,
+                       GList         *disabled_monitor_specs,
+                       GfMonitorSpec *monitor_spec)
+{
+  if (gf_logical_monitor_configs_have_monitor (logical_monitor_configs,
+                                               monitor_spec))
+    return TRUE;
+
+  return g_list_find_custom (disabled_monitor_specs, monitor_spec,
+                             (GCompareFunc) gf_monitor_spec_compare) != NULL;
+}
+
+/*
+ * Monitors can be plugged in and unplugged while the session runs. Returns a
+ * configuration that keeps the monitors that are still connected exactly as
+ * @base_config has them and enables every newly connected monitor at its
+ * preferred mode, to the right of the others. Returns NULL when no such
+ * configuration exists, for example when none of the monitors @base_config
+ * enables is still connected or when the remaining monitors are no longer
+ * adjacent.
+ */
+GfMonitorsConfig *
+gf_monitor_config_manager_create_for_hotplug (GfMonitorConfigManager *config_manager,
+                                              GfMonitorsConfig       *base_config)
+{
+  GfMonitorManager *monitor_manager;
+  GfMonitorsConfig *config;
+  GList *logical_monitor_configs;
+  GList *disabled_monitor_specs;
+  GfLogicalMonitorLayoutMode layout_mode;
+  GfMonitorsConfig *hotplug_config;
+  gboolean has_primary;
+  float scale;
+  int min_x, min_y;
+  int x;
+  GList *l;
+  GError *error;
+
+  monitor_manager = config_manager->monitor_manager;
+
+  /* Monitors on connectors that stayed connected may have changed identity. */
+  config = gf_monitor_config_manager_update_identities (config_manager,
+                                                        base_config);
+
+  logical_monitor_configs = gf_clone_logical_monitor_config_list (config->logical_monitor_configs);
+  layout_mode = config->layout_mode;
+
+  if (!remove_disconnected_monitor_configs (monitor_manager,
+                                            &logical_monitor_configs) ||
+      logical_monitor_configs == NULL)
+    {
+      g_list_free_full (logical_monitor_configs,
+                        (GDestroyNotify) gf_logical_monitor_config_free);
+      g_object_unref (config);
+
+      return NULL;
+    }
+
+  disabled_monitor_specs = NULL;
+  for (l = config->disabled_monitor_specs; l; l = l->next)
+    {
+      GfMonitorSpec *monitor_spec;
+
+      monitor_spec = l->data;
+
+      if (!gf_monitor_manager_get_monitor_from_spec (monitor_manager,
+                                                     monitor_spec))
+        continue;
+
+      disabled_monitor_specs = g_list_append (disabled_monitor_specs,
+                                              gf_monitor_spec_clone (monitor_spec));
+    }
+
+  g_object_unref (config);
+
+  /*
+   * The monitor that went away may have been the leftmost or topmost one,
+   * the layout has to start at the origin again.
+   */
+  min_x = min_y = G_MAXINT;
+  for (l = logical_monitor_configs; l; l = l->next)
+    {
+      GfLogicalMonitorConfig *logical_monitor_config;
+
+      logical_monitor_config = l->data;
+
+      min_x = MIN (min_x, logical_monitor_config->layout.x);
+      min_y = MIN (min_y, logical_monitor_config->layout.y);
+    }
+
+  has_primary = FALSE;
+  x = 0;
+
+  for (l = logical_monitor_configs; l; l = l->next)
+    {
+      GfLogicalMonitorConfig *logical_monitor_config;
+
+      logical_monitor_config = l->data;
+
+      logical_monitor_config->layout.x -= min_x;
+      logical_monitor_config->layout.y -= min_y;
+
+      x = MAX (x, logical_monitor_config->layout.x +
+                  logical_monitor_config->layout.width);
+
+      if (logical_monitor_config->is_primary)
+        has_primary = TRUE;
+    }
+
+  if (!has_primary)
+    {
+      GfLogicalMonitorConfig *logical_monitor_config;
+
+      logical_monitor_config = logical_monitor_configs->data;
+      logical_monitor_config->is_primary = TRUE;
+    }
+
+  /* All logical monitors share one scale on X11. */
+  scale = ((GfLogicalMonitorConfig *) logical_monitor_configs->data)->scale;
+
+  for (l = gf_monitor_manager_get_monitors (monitor_manager); l; l = l->next)
+    {
+      GfMonitor *monitor;
+      GfLogicalMonitorConfig *logical_monitor_config;
+
+      monitor = l->data;
+
+      if (!gf_monitor_manager_is_monitor_visible (monitor_manager, monitor))
+        continue;
+
+      if (is_monitor_configured (logical_monitor_configs,
+                                 disabled_monitor_specs,
+                                 gf_monitor_get_spec (monitor)))
+        continue;
+
+      logical_monitor_config = create_preferred_logical_monitor_config (monitor_manager,
+                                                                        monitor,
+                                                                        x,
+                                                                        0,
+                                                                        scale,
+                                                                        layout_mode);
+
+      logical_monitor_configs = g_list_append (logical_monitor_configs,
+                                               logical_monitor_config);
+
+      x += logical_monitor_config->layout.width;
+    }
+
+  hotplug_config = gf_monitors_config_new_full (logical_monitor_configs,
+                                                disabled_monitor_specs,
+                                                layout_mode,
+                                                GF_MONITORS_CONFIG_FLAG_NONE);
+
+  error = NULL;
+  if (!gf_verify_monitors_config (hotplug_config, monitor_manager, &error))
+    {
+      g_debug ("Not keeping the monitor configuration: %s", error->message);
+      g_error_free (error);
+      g_object_unref (hotplug_config);
+
+      return NULL;
+    }
+
+  return hotplug_config;
+}
+
 void
 gf_monitor_config_manager_save_current (GfMonitorConfigManager *config_manager)
 {

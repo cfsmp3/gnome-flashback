@@ -75,6 +75,9 @@ GfMonitorsConfig       *gf_monitor_config_manager_get_previous              (GfM
 GfMonitorsConfig       *gf_monitor_config_manager_update_identities         (GfMonitorConfigManager      *config_manager,
                                                                              GfMonitorsConfig            *config);
 
+GfMonitorsConfig       *gf_monitor_config_manager_create_for_hotplug        (GfMonitorConfigManager      *config_manager,
+                                                                             GfMonitorsConfig            *base_config);
+
 void                    gf_monitor_config_manager_clear_history             (GfMonitorConfigManager      *config_manager);
 
 void                    gf_monitor_config_manager_save_current              (GfMonitorConfigManager      *config_manager);
