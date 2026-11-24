@@ -1322,6 +1322,14 @@ gf_monitor_config_manager_assign (GfMonitorManager  *manager,
 
           monitor = gf_monitor_manager_get_monitor_from_spec (manager, monitor_spec);
 
+          /*
+           * The monitor may have changed identity or may have been unplugged
+           * since this configuration was created; assign_monitor_crtcs()
+           * reports it as not found.
+           */
+          if (!monitor)
+            continue;
+
           for (o = gf_monitor_get_outputs (monitor); o; o = o->next)
             {
               GfOutput *output = o->data;
@@ -1554,13 +1562,145 @@ gf_monitor_config_manager_clear_history (GfMonitorConfigManager *config_manager)
   g_queue_clear (&config_manager->config_history);
 }
 
+/*
+ * A monitor's identity follows its EDID, which can change while the session
+ * is running. Returns the identity of the monitor now connected to the
+ * connector @monitor_spec names, or NULL when no monitor with a different
+ * identity took its place.
+ */
+static GfMonitorSpec *
+find_changed_monitor_spec (GfMonitorManager *monitor_manager,
+                           GfMonitorSpec    *monitor_spec)
+{
+  GList *l;
+
+  if (gf_monitor_manager_get_monitor_from_spec (monitor_manager, monitor_spec))
+    return NULL;
+
+  for (l = gf_monitor_manager_get_monitors (monitor_manager); l; l = l->next)
+    {
+      GfMonitor *monitor;
+      GfMonitorSpec *current_spec;
+
+      monitor = l->data;
+      current_spec = gf_monitor_get_spec (monitor);
+
+      if (g_strcmp0 (current_spec->connector, monitor_spec->connector) == 0)
+        return current_spec;
+    }
+
+  return NULL;
+}
+
+static gboolean
+update_monitor_spec (GfMonitorManager  *monitor_manager,
+                     GfMonitorSpec    **monitor_spec)
+{
+  GfMonitorSpec *current_spec;
+
+  current_spec = find_changed_monitor_spec (monitor_manager, *monitor_spec);
+  if (!current_spec)
+    return FALSE;
+
+  gf_monitor_spec_free (*monitor_spec);
+  *monitor_spec = gf_monitor_spec_clone (current_spec);
+
+  return TRUE;
+}
+
+/*
+ * Configurations remembered during the session carry the monitor identities
+ * that were in effect when they were created. Returns @config with every
+ * monitor named by the identity the monitor on the same connector carries
+ * now, so that it keeps applying to the same physical monitors. When no
+ * identity changed, a new reference to @config itself is returned.
+ */
+GfMonitorsConfig *
+gf_monitor_config_manager_update_identities (GfMonitorConfigManager *config_manager,
+                                             GfMonitorsConfig       *config)
+{
+  GfMonitorManager *monitor_manager;
+  GList *logical_monitor_configs;
+  GList *disabled_monitor_specs;
+  GfMonitorsConfig *updated_config;
+  gboolean changed;
+  GList *l;
+
+  monitor_manager = config_manager->monitor_manager;
+
+  logical_monitor_configs = gf_clone_logical_monitor_config_list (config->logical_monitor_configs);
+  disabled_monitor_specs = NULL;
+  changed = FALSE;
+
+  for (l = logical_monitor_configs; l; l = l->next)
+    {
+      GfLogicalMonitorConfig *logical_monitor_config;
+      GList *k;
+
+      logical_monitor_config = l->data;
+
+      for (k = logical_monitor_config->monitor_configs; k; k = k->next)
+        {
+          GfMonitorConfig *monitor_config;
+
+          monitor_config = k->data;
+
+          if (update_monitor_spec (monitor_manager, &monitor_config->monitor_spec))
+            changed = TRUE;
+        }
+    }
+
+  for (l = config->disabled_monitor_specs; l; l = l->next)
+    {
+      GfMonitorSpec *monitor_spec;
+
+      monitor_spec = gf_monitor_spec_clone (l->data);
+
+      if (update_monitor_spec (monitor_manager, &monitor_spec))
+        changed = TRUE;
+
+      disabled_monitor_specs = g_list_append (disabled_monitor_specs,
+                                              monitor_spec);
+    }
+
+  if (!changed)
+    {
+      g_list_free_full (logical_monitor_configs,
+                        (GDestroyNotify) gf_logical_monitor_config_free);
+      g_list_free_full (disabled_monitor_specs,
+                        (GDestroyNotify) gf_monitor_spec_free);
+
+      return g_object_ref (config);
+    }
+
+  updated_config = gf_monitors_config_new_full (logical_monitor_configs,
+                                                disabled_monitor_specs,
+                                                config->layout_mode,
+                                                config->flags);
+
+  gf_monitors_config_set_switch_config (updated_config,
+                                        gf_monitors_config_get_switch_config (config));
+
+  return updated_config;
+}
+
 void
 gf_monitor_config_manager_save_current (GfMonitorConfigManager *config_manager)
 {
+  GfMonitorsConfig *config;
+
   g_return_if_fail (config_manager->current_config);
 
-  gf_monitor_config_store_add (config_manager->config_store,
-                               config_manager->current_config);
+  /*
+   * Save under the identities the monitors carry now, which may differ from
+   * those they carried when the configuration was applied, so that the next
+   * session start finds it for these monitors.
+   */
+  config = gf_monitor_config_manager_update_identities (config_manager,
+                                                        config_manager->current_config);
+
+  gf_monitor_config_store_add (config_manager->config_store, config);
+  g_object_unref (config);
 }
 
 gboolean

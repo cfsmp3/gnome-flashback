@@ -868,8 +868,19 @@ restore_previous_config (GfMonitorManager *manager)
 
   if (previous_config)
     {
+      GfMonitorsConfig *updated_config;
       GfMonitorsConfigMethod method;
       GError *error;
+
+      /*
+       * A monitor may have changed identity while the configuration being
+       * reverted waited for confirmation; it gets the settings its connector
+       * had in the previous configuration.
+       */
+      updated_config = gf_monitor_config_manager_update_identities (manager->config_manager,
+                                                                    previous_config);
+      g_object_unref (previous_config);
+      previous_config = updated_config;
 
       if (manager->panel_orientation_managed)
         {
