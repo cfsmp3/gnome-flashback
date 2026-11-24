@@ -168,6 +168,8 @@ void                        gf_monitor_manager_read_current_state           (GfM
 
 void                        gf_monitor_manager_reconfigure                  (GfMonitorManager            *self);
 
+gboolean                    gf_monitor_manager_apply_stored_config          (GfMonitorManager            *self);
+
 gboolean                    gf_monitor_manager_get_monitor_matrix           (GfMonitorManager            *manager,
                                                                              GfMonitor                   *monitor,
                                                                              GfLogicalMonitor            *logical_monitor,

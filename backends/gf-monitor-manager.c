@@ -2925,10 +2925,81 @@ gf_monitor_manager_read_current_state (GfMonitorManager *manager)
   return GF_MONITOR_MANAGER_GET_CLASS (manager)->read_current_state (manager);
 }
 
+static GfMonitorsConfig *
+apply_stored_config (GfMonitorManager       *manager,
+                     GfMonitorsConfigMethod  method)
+{
+  GfMonitorsConfig *config;
+  GfMonitorsConfig *oriented_config;
+  GError *error;
+
+  config = gf_monitor_config_manager_get_stored (manager->config_manager);
+  if (!config)
+    return NULL;
+
+  oriented_config = NULL;
+
+  if (manager->panel_orientation_managed)
+    {
+      oriented_config = gf_monitor_config_manager_create_for_builtin_orientation (manager->config_manager,
+                                                                                  config);
+
+      if (oriented_config != NULL)
+        config = oriented_config;
+    }
+
+  error = NULL;
+
+  if (!gf_monitor_manager_apply_monitors_config (manager, config,
+                                                 method, &error))
+    {
+      g_clear_object (&oriented_config);
+
+      g_warning ("Failed to use stored monitor configuration: %s",
+                 error->message);
+      g_error_free (error);
+
+      return NULL;
+    }
+
+  g_object_ref (config);
+  g_clear_object (&oriented_config);
+
+  return config;
+}
+
 void
 gf_monitor_manager_reconfigure (GfMonitorManager *self)
 {
   gf_monitor_manager_ensure_configured (self);
+}
+
+/*
+ * Called when a connected monitor changed identity, for example because its
+ * EDID became readable only after the session started. The monitor is now
+ * recognized, so its stored configuration is applied as it would have been at
+ * start-up; when there is none, the current configuration is left in place.
+ * A configuration change waiting for the user's confirmation is never
+ * displaced.
+ */
+gboolean
+gf_monitor_manager_apply_stored_config (GfMonitorManager *self)
+{
+  GfMonitorManagerPrivate *priv;
+  GfMonitorsConfig *config;
+
+  priv = gf_monitor_manager_get_instance_private (self);
+
+  if (priv->persistent_timeout_id != 0)
+    return FALSE;
+
+  config = apply_stored_config (self, GF_MONITORS_CONFIG_METHOD_PERSISTENT);
+  if (!config)
+    return FALSE;
+
+  g_object_unref (config);
+
+  return TRUE;
 }
 
 gboolean
@@ -3008,40 +3079,9 @@ gf_monitor_manager_ensure_configured (GfMonitorManager *manager)
 
   if (use_stored_config)
     {
-      config = gf_monitor_config_manager_get_stored (manager->config_manager);
-
+      config = apply_stored_config (manager, method);
       if (config)
-        {
-          GfMonitorsConfig *oriented_config;
-
-          oriented_config = NULL;
-
-          if (manager->panel_orientation_managed)
-            {
-              oriented_config = gf_monitor_config_manager_create_for_builtin_orientation (manager->config_manager,
-                                                                                          config);
-
-              if (oriented_config != NULL)
-                config = oriented_config;
-            }
-
-          if (!gf_monitor_manager_apply_monitors_config (manager, config,
-                                                         method, &error))
-            {
-              config = NULL;
-              g_clear_object (&oriented_config);
-
-              g_warning ("Failed to use stored monitor configuration: %s",
-                         error->message);
-              g_clear_error (&error);
-            }
-          else
-            {
-              g_object_ref (config);
-              g_clear_object (&oriented_config);
-              goto done;
-            }
-        }
+        goto done;
     }
 
   if (manager->panel_orientation_managed)

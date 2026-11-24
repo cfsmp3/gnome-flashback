@@ -42,7 +42,9 @@
 #include "gf-monitor-config-manager-private.h"
 #include "gf-monitor-manager-xrandr-private.h"
 #include "gf-monitor-private.h"
+#include "gf-monitor-spec-private.h"
 #include "gf-monitor-tiled-private.h"
+#include "gf-output-info-private.h"
 #include "gf-output-xrandr-private.h"
 
 /* Look for DPI_FALLBACK in:
@@ -65,6 +67,9 @@ struct _GfMonitorManagerXrandr
   GHashTable       *tiled_monitor_atoms;
 
   Time              last_xrandr_set_timestamp;
+
+  Atom              edid_atom;
+  Atom              edid_data_atom;
 };
 
 typedef struct
@@ -608,6 +613,9 @@ gf_monitor_manager_xrandr_constructed (GObject *object)
   xrandr->xdisplay = gf_backend_x11_get_xdisplay (GF_BACKEND_X11 (backend));
   xrandr->xroot = DefaultRootWindow (xrandr->xdisplay);
 
+  xrandr->edid_atom = XInternAtom (xrandr->xdisplay, "EDID", False);
+  xrandr->edid_data_atom = XInternAtom (xrandr->xdisplay, "EDID_DATA", False);
+
   if (XRRQueryExtension (xrandr->xdisplay, &rr_event_base, &rr_error_base))
     {
       gint major_version;
@@ -616,8 +624,9 @@ gf_monitor_manager_xrandr_constructed (GObject *object)
       xrandr->rr_event_base = rr_event_base;
       xrandr->rr_error_base = rr_error_base;
 
-      /* We only use ScreenChangeNotify, but GDK uses the others,
-       * and we don't want to step on its toes.
+      /* We use ScreenChangeNotify and OutputPropertyNotify, the latter
+       * for EDID changes. GDK uses the others, and we don't want to step
+       * on its toes.
        */
       XRRSelectInput (xrandr->xdisplay, xrandr->xroot,
                       RRScreenChangeNotifyMask |
@@ -1073,50 +1082,220 @@ gf_monitor_manager_xrandr_has_randr15 (GfMonitorManagerXrandr *xrandr)
   return xrandr->has_randr15;
 }
 
-gboolean
-gf_monitor_manager_xrandr_handle_xevent (GfMonitorManagerXrandr *xrandr,
-                                         XEvent                 *event)
+static void
+rebuild_derived (GfMonitorManagerXrandr *xrandr,
+                 XRRScreenResources     *resources)
 {
   GfMonitorManager *manager;
-  GfGpu *gpu;
-  GfGpuXrandr *gpu_xrandr;
+  GfMonitorsConfig *config;
+
+  manager = GF_MONITOR_MANAGER (xrandr);
+  config = NULL;
+
+  if (resources->timestamp == xrandr->last_xrandr_set_timestamp)
+    {
+      GfMonitorConfigManager *config_manager;
+
+      config_manager = gf_monitor_manager_get_config_manager (manager);
+      config = gf_monitor_config_manager_get_current (config_manager);
+    }
+
+  gf_monitor_manager_rebuild_derived (manager, config);
+}
+
+static GList *
+get_monitor_specs (GfMonitorManager *manager)
+{
+  GList *monitor_specs;
+  GList *l;
+
+  monitor_specs = NULL;
+
+  for (l = gf_monitor_manager_get_monitors (manager); l; l = l->next)
+    {
+      GfMonitorSpec *monitor_spec;
+
+      monitor_spec = gf_monitor_get_spec (l->data);
+      monitor_specs = g_list_prepend (monitor_specs,
+                                      gf_monitor_spec_clone (monitor_spec));
+    }
+
+  return g_list_sort (monitor_specs, (GCompareFunc) gf_monitor_spec_compare);
+}
+
+static gboolean
+monitor_specs_equal (GList *monitor_specs_a,
+                     GList *monitor_specs_b)
+{
+  GList *a;
+  GList *b;
+
+  for (a = monitor_specs_a, b = monitor_specs_b;
+       a != NULL && b != NULL;
+       a = a->next, b = b->next)
+    {
+      if (!gf_monitor_spec_equals (a->data, b->data))
+        return FALSE;
+    }
+
+  return a == NULL && b == NULL;
+}
+
+/*
+ * Re-reads the screen state, which also reads the identity of every monitor
+ * from its current EDID. Returns whether the identities of the connected
+ * monitors changed.
+ */
+static gboolean
+read_current_state (GfMonitorManagerXrandr *xrandr)
+{
+  GfMonitorManager *manager;
+  GList *old_monitor_specs;
+  GList *new_monitor_specs;
+  gboolean changed;
+
+  manager = GF_MONITOR_MANAGER (xrandr);
+
+  old_monitor_specs = get_monitor_specs (manager);
+  gf_monitor_manager_read_current_state (manager);
+  new_monitor_specs = get_monitor_specs (manager);
+
+  changed = !monitor_specs_equal (old_monitor_specs, new_monitor_specs);
+
+  g_list_free_full (old_monitor_specs, (GDestroyNotify) gf_monitor_spec_free);
+  g_list_free_full (new_monitor_specs, (GDestroyNotify) gf_monitor_spec_free);
+
+  return changed;
+}
+
+static void
+update_screen_state (GfMonitorManagerXrandr *xrandr)
+{
+  GfMonitorManager *manager;
+  gboolean identities_changed;
   XRRScreenResources *resources;
 
   manager = GF_MONITOR_MANAGER (xrandr);
 
-  if ((event->type - xrandr->rr_event_base) != RRScreenChangeNotify)
-    return FALSE;
+  identities_changed = read_current_state (xrandr);
 
-  XRRUpdateConfiguration (event);
-  gf_monitor_manager_read_current_state (manager);
-
-  gpu = get_gpu (xrandr);
-  gpu_xrandr = GF_GPU_XRANDR (gpu);
-  resources = gf_gpu_xrandr_get_resources (gpu_xrandr);
+  resources = gf_gpu_xrandr_get_resources (GF_GPU_XRANDR (get_gpu (xrandr)));
 
   if (!resources)
-    return TRUE;
+    return;
 
   if (resources->timestamp < resources->configTimestamp)
     {
       gf_monitor_manager_reconfigure (manager);
+      return;
     }
-  else
+
+  /*
+   * A monitor whose EDID became readable or changed is recognized now, use
+   * the stored configuration for the connected monitors if there is one.
+   */
+  if (identities_changed && gf_monitor_manager_apply_stored_config (manager))
+    return;
+
+  rebuild_derived (xrandr, resources);
+}
+
+static GfOutput *
+find_output (GfMonitorManagerXrandr *xrandr,
+             RROutput                output_id)
+{
+  GList *l;
+
+  for (l = gf_gpu_get_outputs (get_gpu (xrandr)); l; l = l->next)
     {
-      GfMonitorsConfig *config;
+      GfOutput *output;
 
-      config = NULL;
+      output = l->data;
 
-      if (resources->timestamp == xrandr->last_xrandr_set_timestamp)
-        {
-          GfMonitorConfigManager *config_manager;
-
-          config_manager = gf_monitor_manager_get_config_manager (manager);
-          config = gf_monitor_config_manager_get_current (config_manager);
-        }
-
-      gf_monitor_manager_rebuild_derived (manager, config);
+      if (gf_output_get_id (output) == (uint64_t) output_id)
+        return output;
     }
+
+  return NULL;
+}
+
+static gboolean
+is_output_identity_changed (GfOutput *output)
+{
+  GBytes *edid;
+  GfOutputInfo *output_info;
+  const GfOutputInfo *current_output_info;
+  gboolean changed;
+
+  edid = gf_output_xrandr_read_edid (GF_OUTPUT_XRANDR (output));
+
+  output_info = gf_output_info_new ();
+  gf_output_info_parse_edid (output_info, edid);
+  g_clear_pointer (&edid, g_bytes_unref);
+
+  current_output_info = gf_output_get_info (output);
+
+  changed = g_strcmp0 (output_info->vendor, current_output_info->vendor) != 0 ||
+            g_strcmp0 (output_info->product, current_output_info->product) != 0 ||
+            g_strcmp0 (output_info->serial, current_output_info->serial) != 0;
+
+  gf_output_info_unref (output_info);
+
+  return changed;
+}
+
+/*
+ * The EDID of a connected output can be written, replaced or removed without
+ * any other change to the screen, for example when the driver can read it
+ * only some time after the output got connected. The EDID of a disconnected
+ * output is read when the output is connected.
+ */
+static void
+handle_output_property_notify (GfMonitorManagerXrandr       *xrandr,
+                               XRROutputPropertyNotifyEvent *event)
+{
+  GfOutput *output;
+
+  if (event->property != xrandr->edid_atom &&
+      event->property != xrandr->edid_data_atom)
+    return;
+
+  output = find_output (xrandr, event->output);
+
+  if (output == NULL || !is_output_identity_changed (output))
+    return;
+
+  update_screen_state (xrandr);
+}
+
+gboolean
+gf_monitor_manager_xrandr_handle_xevent (GfMonitorManagerXrandr *xrandr,
+                                         XEvent                 *event)
+{
+  int event_type;
+
+  event_type = event->type - xrandr->rr_event_base;
+
+  if (event_type == RRNotify)
+    {
+      XRRNotifyEvent *notify_event;
+
+      notify_event = (XRRNotifyEvent *) event;
+
+      if (notify_event->subtype != RRNotify_OutputProperty)
+        return FALSE;
+
+      handle_output_property_notify (xrandr,
+                                     (XRROutputPropertyNotifyEvent *) event);
+
+      return TRUE;
+    }
+
+  if (event_type != RRScreenChangeNotify)
+    return FALSE;
+
+  XRRUpdateConfiguration (event);
+  update_screen_state (xrandr);
 
   return TRUE;
 }
