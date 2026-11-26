@@ -25,6 +25,7 @@ variables:
                   libgnome-bluetooth-3.0-dev
                   libgnome-desktop-3-dev
                   libgnome-panel-dev
+                  libgstreamer1.0-dev
                   libgtk-3-dev
                   libgudev-1.0-dev
                   libibus-1.0-dev
