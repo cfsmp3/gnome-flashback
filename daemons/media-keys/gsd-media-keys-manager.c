@@ -78,6 +78,7 @@ typedef struct
         GDBusProxy      *screencast_proxy;
         guint            screencast_timeout_id;
         gboolean         screencast_recording;
+        guint            screencast_serial;
         GCancellable    *screencast_cancellable;
 
         /* Brightness stuff */
@@ -518,6 +519,9 @@ screencast_stop (GsdMediaKeysManager *manager)
 {
         GsdMediaKeysManagerPrivate *priv = GSD_MEDIA_KEYS_MANAGER_GET_PRIVATE (manager);
 
+        /* A reply to an earlier start no longer concerns this state. */
+        priv->screencast_serial++;
+
         if (priv->screencast_timeout_id > 0) {
                 g_source_remove (priv->screencast_timeout_id);
                 priv->screencast_timeout_id = 0;
@@ -540,11 +544,71 @@ screencast_timeout (gpointer user_data)
         return G_SOURCE_REMOVE;
 }
 
+typedef struct {
+        GsdMediaKeysManager *manager;
+        guint                serial;
+} ScreencastStartData;
+
+static void
+screencast_start_cb (GObject      *source,
+                     GAsyncResult *result,
+                     gpointer      user_data)
+{
+        ScreencastStartData *data = user_data;
+        GsdMediaKeysManager *manager;
+        GsdMediaKeysManagerPrivate *priv;
+        GVariant *reply;
+        GError *error = NULL;
+        gboolean success = FALSE;
+
+        reply = g_dbus_proxy_call_finish (G_DBUS_PROXY (source), result, &error);
+
+        if (reply != NULL) {
+                g_variant_get (reply, "(b&s)", &success, NULL);
+                g_variant_unref (reply);
+        }
+
+        /* Cancelled when the manager stops: it may be gone already. */
+        if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
+                g_error_free (error);
+                g_free (data);
+                return;
+        }
+
+        manager = data->manager;
+        priv = GSD_MEDIA_KEYS_MANAGER_GET_PRIVATE (manager);
+
+        if (!success && data->serial == priv->screencast_serial) {
+                /*
+                 * Nothing is being recorded, so the next press has to
+                 * start a recording rather than stop one.
+                 */
+                if (error != NULL)
+                        g_warning ("Failed to start a screencast: %s", error->message);
+
+                if (priv->screencast_timeout_id > 0) {
+                        g_source_remove (priv->screencast_timeout_id);
+                        priv->screencast_timeout_id = 0;
+                }
+
+                priv->screencast_recording = FALSE;
+        }
+
+        g_clear_error (&error);
+        g_free (data);
+}
+
 static void
 screencast_start (GsdMediaKeysManager *manager)
 {
         GsdMediaKeysManagerPrivate *priv = GSD_MEDIA_KEYS_MANAGER_GET_PRIVATE (manager);
+        ScreencastStartData *data;
         guint max_length;
+
+        data = g_new0 (ScreencastStartData, 1);
+        data->manager = manager;
+        data->serial = ++priv->screencast_serial;
+
         g_dbus_proxy_call (priv->screencast_proxy,
                            "Screencast",
                            g_variant_new_parsed ("(%s, @a{sv} {})",
@@ -555,7 +619,7 @@ screencast_start (GsdMediaKeysManager *manager)
                                                  _("Screencast from %d %t.webm")),
                            G_DBUS_CALL_FLAGS_NONE, -1,
                            priv->screencast_cancellable,
-                           NULL, NULL);
+                           screencast_start_cb, data);
 
         max_length = g_settings_get_uint (priv->settings, "max-screencast-length");
 
